@@ -43,8 +43,19 @@ sudo ./install.sh apply # apply the missing parts
 reboot
 ```
 
-`sudo ./install.sh remove` undoes it. The check exits `0` (nothing to do),
-`1` (fixable) or `2` (something this script can't fix — see below).
+The check exits `0` (nothing to do), `1` (fixable) or `2` (something this script can't
+fix — see below).
+
+`sudo ./install.sh remove` undoes everything: the firmware alias links, the saved
+variant in `/etc/tas2783-variant`, and the UCM file (if it's still this repo's copy and
+no package owns it). It works even when the amps aren't detected, for example after
+switching to a kernel where SoundWire doesn't enumerate. It then falls back to
+matching the alias names (`<SSID>-<link>-0x<uid>.bin*`) in the firmware root.
+
+It only removes a link that has the exact shape this script creates: it points to
+`ti/audio/tas2783/<SSID>-<variant>-<link>-0x<uid>` for the same name, and no package owns
+it. It never touches anything inside `ti/`, or the many similarly named links that
+linux-firmware installs itself.
 
 ## Will it work on other distros?
 
@@ -67,7 +78,7 @@ distros (Linux Mint, Pop!_OS) may need a newer kernel and firmware first.
   `/usr/share/alsa/ucm2/sof-soundwire/tas2783.conf` and upgrade again.
 - The firmware symlinks become unnecessary once the kernel or linux-firmware fix the
   naming. `install.sh` leaves real files and package-provided links alone, and
-  `remove` only deletes the two names it creates for your amps.
+  `remove` only deletes the alias links it creates.
 
 ## Firmware variant
 
@@ -97,13 +108,28 @@ and if several ship it stops and asks you to choose with `TAS_VARIANT`.
 ### Choosing a different variant
 
 ```sh
-sudo TAS_VARIANT=0 ./install.sh apply   # repoint the links to variant 0
+sudo TAS_VARIANT=0 ./install.sh apply   # repoint the links to variant 0 and remember it
 reboot
 ```
 
-To undo the override, run `sudo ./install.sh apply` again without `TAS_VARIANT`. That
-repoints the links to the default. `sudo ./install.sh remove` removes them entirely.
-Reboot after either. `./install.sh` (check mode) shows which variant is in use and why.
+`apply` with `TAS_VARIANT` set saves the number to **`/etc/tas2783-variant`**, so later
+plain `./install.sh` checks and `apply` runs keep using it instead of switching back to
+the default. The script picks the variant in this order:
+
+1. `TAS_VARIANT` from the environment
+2. `/etc/tas2783-variant`
+3. the board default (`8EA2` → `1`)
+4. the only variant shipped for the board (if there are several, it stops and asks)
+
+Check mode prints which one it used, for example
+`firmware variant 0 (saved in /etc/tas2783-variant)`.
+
+To clear the override and go back to the board default:
+
+```sh
+sudo TAS_VARIANT=default ./install.sh apply   # deletes /etc/tas2783-variant, repoints links
+reboot
+```
 
 ### Checking your unit's variant from Windows
 

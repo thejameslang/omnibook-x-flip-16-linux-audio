@@ -34,19 +34,35 @@ speaker supplier), **not** the SoundWire link.
   verified on one unit only.
 - Other SSIDs: if one variant ships it's used; if several ship the check reports
   `[fail]` and the user must choose.
-- Override: `sudo TAS_VARIANT=0 ./install.sh apply`, then reboot. Undo by re-running
-  `apply` without it, or with `remove`.
-- Check mode prints the variant in use and why, and reports `[fix]` if the existing
-  symlinks point at a different variant.
+- Override: `sudo TAS_VARIANT=0 ./install.sh apply`, then reboot. `apply` saves it to
+  `/etc/tas2783-variant`, so later plain runs keep it.
+- Variant order: `TAS_VARIANT` env → `/etc/tas2783-variant` → board default
+  (8EA2 → 1) → the only shipped variant, otherwise blocked. An invalid saved value
+  gives `[fail]`.
+- Clear the override: `sudo TAS_VARIANT=default ./install.sh apply` deletes the file
+  and repoints the links to the board default. `remove` also deletes it.
+- Check mode prints the variant in use and its source (e.g. `saved in
+  /etc/tas2783-variant`), and reports `[fix]` if the existing symlinks point at a
+  different variant.
+
+If a user says "it keeps using variant 0", check `/etc/tas2783-variant` first.
 
 When checking a machine, read the variant line and confirm the symlink targets
 (`ls -l /lib/firmware/<SSID>-*`) match it. If the speakers sound distorted, thin or
 unbalanced, the wrong variant is the first suspect. The README explains how to verify
 the variant from Windows.
 
-`remove` only deletes the requested-name symlinks for this machine's amps. linux-firmware
-itself ships many `<SSID>-<variant>-<link>-*` symlinks in the firmware root. Those are
-package-owned and must never be deleted.
+`remove` deletes the alias symlinks, `/etc/tas2783-variant`, and this repo's UCM copy.
+It works without detected amps: first it removes the names requested by detected amps,
+then any `<SSID>-<digits>-0x*.bin*` alias. If the SSID is unknown too, it removes any
+`XXXX-<digits>-0x<hex>.bin*` alias.
+
+linux-firmware itself ships ~100 root symlinks with the same name pattern (e.g.
+`15E2-0-0x9.bin.zst -> ti/audio/tas2783/15E2-0-0x9.bin.zst`). These must never be
+deleted. `is_our_link` guards against it in two ways: the link must point to the
+4-field `<SSID>-<variant>-<link>-0x<uid>` file for the same name, and it must not be
+package-owned. Keep both checks if you change removal. To test `remove`, use a fake
+root, or a copy with `rm` replaced by `echo`. Never test it on the real system.
 
 The distro might have fixed things differently since this was written (Nov 2026) — e.g.
 upstream may have shipped `tas2783.conf` or changed firmware names. Check before
