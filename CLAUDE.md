@@ -35,7 +35,9 @@ speaker supplier), **not** the SoundWire link.
 - Other SSIDs: if one variant ships it's used; if several ship the check reports
   `[fail]` and the user must choose.
 - Override: `sudo TAS_VARIANT=0 ./install.sh apply`, then reboot. `apply` saves it to
-  `/etc/tas2783-variant`, so later plain runs keep it.
+  `/etc/tas2783-variant`, so later plain runs keep it. A `TAS_VARIANT` without
+  firmware for every detected amp (or with no amps detected) gives `[fail]`. It's then
+  neither saved nor used, and the links and any existing saved value stay as they are.
 - Variant order: `TAS_VARIANT` env → `/etc/tas2783-variant` → board default
   (8EA2 → 1) → the only shipped variant, otherwise blocked. An invalid saved value
   gives `[fail]`.

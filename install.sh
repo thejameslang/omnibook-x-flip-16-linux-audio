@@ -164,7 +164,9 @@ SAVED=""
 if [ -e "$VARIANT_FILE" ]; then
     SAVED="$(tr -d '[:space:]' < "$VARIANT_FILE")"
 fi
-VARIANT_SAVE=""     # "", a number to write, or "delete"
+VARIANT=""
+VARIANT_STATE=""   # "", "ok" or "blocked"
+VARIANT_SAVE=""    # "", a number to write, or "delete"
 case "${TAS_VARIANT:-}" in
     "") ;;
     default)
@@ -173,15 +175,30 @@ case "${TAS_VARIANT:-}" in
             VARIANT_SAVE=delete
         fi;;
     *)
-        if [ "$SAVED" != "$TAS_VARIANT" ]; then
-            todo "will save variant $TAS_VARIANT to $VARIANT_FILE"
-            VARIANT_SAVE="$TAS_VARIANT"
+        # Only accept (and save) a variant that has firmware for every detected amp.
+        if [ -z "$SSID" ] || [ ${#AMPS[@]} -eq 0 ] || [ ! -d "$FW_TI" ]; then
+            bad "can't verify TAS_VARIANT=$TAS_VARIANT (no amps, subsystem ID or firmware dir detected); not using or saving it"
+            VARIANT_STATE=blocked
+        else
+            MISSING=()
+            for a in "${AMPS[@]}"; do
+                parse_amp "$a"
+                b="$SSID-$TAS_VARIANT-$LINK-0x$UID_HEX"
+                [ -e "$FW_TI/$b.bin.zst" ] || [ -e "$FW_TI/$b.bin.xz" ] || [ -e "$FW_TI/$b.bin" ] \
+                    || MISSING+=("$b.bin")
+            done
+            if [ ${#MISSING[@]} -gt 0 ]; then
+                bad "TAS_VARIANT=$TAS_VARIANT has no firmware for: ${MISSING[*]}; not using or saving it"
+                info "available for this model: $(cd "$FW_TI" && ls | grep -i "^$SSID-" | tr '\n' ' ')"
+                VARIANT_STATE=blocked
+            elif [ "$SAVED" != "$TAS_VARIANT" ]; then
+                todo "will save variant $TAS_VARIANT to $VARIANT_FILE"
+                VARIANT_SAVE="$TAS_VARIANT"
+            fi
         fi;;
 esac
 
 # Decided lazily: only needed if some requested firmware name is missing or is our symlink.
-VARIANT=""
-VARIANT_STATE=""   # "", "ok" or "blocked"
 resolve_variant() {
     [ "$VARIANT_STATE" = ok ] && return 0
     [ "$VARIANT_STATE" = blocked ] && return 1

@@ -114,7 +114,9 @@ reboot
 
 `apply` with `TAS_VARIANT` set saves the number to **`/etc/tas2783-variant`**, so later
 plain `./install.sh` checks and `apply` runs keep using it instead of switching back to
-the default. The script picks the variant in this order:
+the default. It only accepts and saves a variant that has firmware for every detected
+amp. Otherwise it reports `[fail]`, lists the available files, and changes nothing.
+The script picks the variant in this order:
 
 1. `TAS_VARIANT` from the environment
 2. `/etc/tas2783-variant`
