@@ -26,10 +26,12 @@ Two separate problems, both needed:
    and PipeWire exposes nothing. Upstream added it in Aug 2026
    ([alsa-ucm-conf #812](https://github.com/alsa-project/alsa-ucm-conf/pull/812)) but it
    is not in a tagged release yet. `tas2783.conf` in this repo is that upstream file.
-2. **Firmware name mismatch.** The kernel driver requests `<SSID>-<link>-0x<id>.bin`
+2. **Firmware name mismatch.** The kernel driver requests `<SSID>-<link>-0x<uid>.bin`
    (e.g. `8EA2-0-0xC.bin`) from the firmware root, while linux-firmware ships the
-   right files as `ti/audio/tas2783/8EA2-0-0-0xC.bin.zst`. Without firmware the amps
-   reject playback. The fix symlinks the requested name to the shipped file.
+   files as `ti/audio/tas2783/<SSID>-<variant>-<link>-0x<uid>.bin.zst`, with more than
+   one tuning variant per board. Without firmware the amps reject playback. The fix
+   symlinks the requested name to the right variant — see
+   [Firmware variant](#firmware-variant).
 
 ## Usage
 
@@ -64,11 +66,70 @@ distros (Linux Mint, Pop!_OS) may need a newer kernel and firmware first.
   report a file conflict (pacman: "exists in filesystem"). Delete
   `/usr/share/alsa/ucm2/sof-soundwire/tas2783.conf` and upgrade again.
 - The firmware symlinks become unnecessary once the kernel or linux-firmware fix the
-  naming; leaving them is harmless. `install.sh` skips links that already resolve.
+  naming. `install.sh` leaves real files and package-provided links alone, and
+  `remove` only deletes the two names it creates for your amps.
+
+## Firmware variant
+
+linux-firmware names the TAS2783 tuning files
+
+```
+<SSID>-<variant>-<link>-0x<uid>.bin     e.g. 8EA2-1-0-0xC.bin.zst
+```
+
+- `SSID` — the audio subsystem ID of the laptop (`8EA2` here).
+- `variant` — a tuning variant (`0` or `1` for this board), most likely for different
+  speaker suppliers. It is **not** the SoundWire link.
+- `link` and `uid` — where each amp sits on the SoundWire bus (here link `0`,
+  amps `0x9` and `0xC`).
+
+The kernel driver only asks for `<SSID>-<link>-0x<uid>.bin`, so the script has to pick
+the variant. An earlier version of this repo picked variant 0 by mistake.
+
+**What this unit uses:** on Windows, Process Monitor showed HP's `SDCATITASXu` driver
+loading `8EA2-1-0-0x9.bin` and `8EA2-1-0-0xC.bin`, and never touching `8EA2-0-0-*`.
+So `install.sh` defaults to **variant 1 for SSID 8EA2**. This has been verified on
+**one unit only**; another 8EA2 laptop with different speakers could need variant 0.
+
+For other SSIDs the script doesn't guess: if exactly one variant ships it uses that,
+and if several ship it stops and asks you to choose with `TAS_VARIANT`.
+
+### Choosing a different variant
+
+```sh
+sudo TAS_VARIANT=0 ./install.sh apply   # repoint the links to variant 0
+reboot
+```
+
+To undo the override, run `sudo ./install.sh apply` again without `TAS_VARIANT`. That
+repoints the links to the default. `sudo ./install.sh remove` removes them entirely.
+Reboot after either. `./install.sh` (check mode) shows which variant is in use and why.
+
+### Checking your unit's variant from Windows
+
+If you still have Windows (or can boot it from another drive):
+
+1. Get [Process Monitor](https://learn.microsoft.com/sysinternals/downloads/procmon)
+   and add filters: *Process Name is `System`* and *Path contains `8EA2-`*. Use your
+   own SSID if it differs. `./install.sh` prints it on Linux. On Windows it's the first
+   4 hex digits after `SUBSYS_` in the audio device's hardware ID (`SUBSYS_8EA2103C`).
+2. In an admin terminal, list the TI amps (SoundWire manufacturer `0102`):
+   ```
+   pnputil /enum-devices /connected | findstr /i "MAN_0102"
+   ```
+   This lists two instance IDs, one per amp.
+3. With Process Monitor capturing, restart both amps so their firmware reloads:
+   ```
+   pnputil /restart-device "<instance id 1>"
+   pnputil /restart-device "<instance id 2>"
+   ```
+   If `/restart-device` isn't available, use `/disable-device` then `/enable-device`.
+4. Play some audio, then look at which `8EA2-*-0-*.bin` files the System process
+   read. The number after the SSID is your variant.
+
+Please open an issue with your result, especially if it's variant 0.
 
 ## Notes
 
 - `port 2 not supported for TX` messages in the kernel log come from the amp's
   feedback/capture path and do not affect playback.
-- The amps here are on SoundWire link 0 (IDs 0x9, 0xC), so the `8EA2-0-0-*` firmware is
-  used. If sound is distorted or unbalanced, the `8EA2-1-0-*` variants are the thing to try.

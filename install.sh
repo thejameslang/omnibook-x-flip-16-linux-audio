@@ -2,9 +2,14 @@
 # Audio fix for laptops with AMD ACP SoundWire + TI TAS2783 speaker amps
 # (tested on HP OmniBook X Flip 16-cc0xxx, AMD Ryzen AI 9 465, CachyOS, kernel 7.3).
 #
-#   ./install.sh            check only (no root needed, changes nothing)
+#   ./install.sh              check only (no root needed, changes nothing)
 #   sudo ./install.sh apply   apply whatever parts of the fix are missing
 #   sudo ./install.sh remove  undo what this script installed
+#
+# Amp firmware tuning variant: linux-firmware names files
+#   <SSID>-<variant>-<link>-0x<uid>.bin   e.g. 8EA2-1-0-0xC.bin.zst
+# Default variant is 1 for SSID 8EA2 (verified on Windows); override with
+#   sudo TAS_VARIANT=0 ./install.sh apply
 #
 # Exit codes for "check": 0 = nothing to do, 1 = fix needed and can be applied,
 #                         2 = cannot be fixed by this script (see messages).
@@ -16,6 +21,7 @@ UCM_DIR=/usr/share/alsa/ucm2/sof-soundwire
 UCM_FILE="$UCM_DIR/tas2783.conf"
 FW_ROOT="$(readlink -f /lib/firmware 2>/dev/null || echo /lib/firmware)"
 FW_TI="$FW_ROOT/ti/audio/tas2783"
+FW_REL="ti/audio/tas2783"
 
 ok()   { printf '  \033[32m[ok]\033[0m   %s\n' "$*"; }
 todo() { printf '  \033[33m[fix]\033[0m  %s\n' "$*"; NEED_FIX=1; }
@@ -29,17 +35,74 @@ case "$MODE" in check|apply|remove) ;; *) echo "usage: $0 [check|apply|remove]";
 if [ "$MODE" != check ] && [ "$(id -u)" -ne 0 ]; then
     echo "'$MODE' needs root: sudo $0 $MODE"; exit 77
 fi
+if [ -n "${TAS_VARIANT:-}" ] && ! [[ "$TAS_VARIANT" =~ ^[0-9]+$ ]]; then
+    echo "TAS_VARIANT must be a number (e.g. 0 or 1), got '$TAS_VARIANT'"; exit 64
+fi
+
+# True if a package manager owns the path (never touch those).
+pkg_owned() {
+    if command -v pacman >/dev/null 2>&1; then pacman -Qo "$1" >/dev/null 2>&1 && return 0; fi
+    if command -v dpkg >/dev/null 2>&1; then dpkg -S "$1" >/dev/null 2>&1 && return 0; fi
+    if command -v rpm >/dev/null 2>&1; then rpm -qf "$1" >/dev/null 2>&1 && return 0; fi
+    return 1
+}
+
+# First existing "$FW_ROOT/<name>.bin*" path, or empty.
+find_requested() {
+    local f
+    for f in "$FW_ROOT/$1".bin "$FW_ROOT/$1".bin.zst "$FW_ROOT/$1".bin.xz; do
+        if [ -e "$f" ] || [ -L "$f" ]; then echo "$f"; return; fi
+    done
+}
+
+# ---------------------------------------------------------------- hardware
+[ "$MODE" = remove ] || echo "== System"
+[ "$MODE" = remove ] || {
+    info "$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null) $(cat /sys/class/dmi/id/product_name 2>/dev/null)"
+    info "kernel $(uname -r)"
+    [ -r /etc/os-release ] && info "$(. /etc/os-release; echo "$PRETTY_NAME")"
+    echo "== Hardware"
+}
+ACP=""
+SSID=""
+for d in /sys/bus/pci/devices/*; do
+    [ "$(cat "$d/vendor" 2>/dev/null)" = 0x1022 ] || continue
+    case "$(cat "$d/class" 2>/dev/null)" in 0x0480*) ACP="$d"; break;; esac
+done
+if [ -z "$ACP" ]; then
+    bad "no AMD Audio Coprocessor (ACP) found - this fix is for AMD SoundWire laptops"
+else
+    SSID="$(sed 's/^0x//' "$ACP/subsystem_device" | tr '[:lower:]' '[:upper:]')"
+    [ "$MODE" = remove ] || ok "AMD ACP at ${ACP##*/}, subsystem ID $SSID"
+fi
+
+AMPS=()
+for d in /sys/bus/soundwire/devices/sdw:*:*:0102:*; do
+    [ -e "$d" ] && AMPS+=("${d##*/}")
+done
+
+# Name the kernel driver requests for an amp: <SSID>-<link>-0x<uid>
+# Sets globals LINK, UID_HEX, WANT.
+parse_amp() {
+    # sdw:<ctrl>:<link>:<mfg>:<part>:<ver>:<unique>
+    IFS=: read -r _ _ LINK _ _ _ UID_HEX <<<"$1"
+    UID_HEX="$(echo "${UID_HEX:-0}" | tr '[:lower:]' '[:upper:]')"
+    WANT="$SSID-$LINK-0x$UID_HEX"
+}
 
 # ---------------------------------------------------------------- remove
 if [ "$MODE" = remove ]; then
-    for l in "$FW_ROOT"/*.bin*; do
-        [ -L "$l" ] || continue
-        case "$(readlink "$l")" in ti/audio/tas2783/*) rm -v "$l";; esac
+    for a in "${AMPS[@]}"; do
+        [ -n "$SSID" ] || break
+        parse_amp "$a"
+        f="$(find_requested "$WANT")"
+        [ -n "$f" ] || continue
+        if [ -L "$f" ] && ! pkg_owned "$f"; then
+            case "$(readlink "$f")" in "$FW_REL"/*) rm -v "$f";; esac
+        fi
     done
     if [ -f "$UCM_FILE" ] && cmp -s "$UCM_FILE" "$HERE/tas2783.conf"; then
-        if command -v pacman >/dev/null && pacman -Qo "$UCM_FILE" >/dev/null 2>&1; then
-            echo "$UCM_FILE is owned by a package now; leaving it."
-        elif command -v dpkg >/dev/null && dpkg -S "$UCM_FILE" >/dev/null 2>&1; then
+        if pkg_owned "$UCM_FILE"; then
             echo "$UCM_FILE is owned by a package now; leaving it."
         else
             rm -v "$UCM_FILE"
@@ -48,29 +111,6 @@ if [ "$MODE" = remove ]; then
     echo "Done. Reboot to take effect."; exit 0
 fi
 
-echo "== System"
-info "$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null) $(cat /sys/class/dmi/id/product_name 2>/dev/null)"
-info "kernel $(uname -r)"
-[ -r /etc/os-release ] && info "$(. /etc/os-release; echo "$PRETTY_NAME")"
-
-# ---------------------------------------------------------------- hardware
-echo "== Hardware"
-ACP=""
-for d in /sys/bus/pci/devices/*; do
-    [ "$(cat "$d/vendor" 2>/dev/null)" = 0x1022 ] || continue
-    case "$(cat "$d/class" 2>/dev/null)" in 0x0480*) ACP="$d"; break;; esac
-done
-if [ -z "$ACP" ]; then
-    bad "no AMD Audio Coprocessor (ACP) found - this fix is for AMD SoundWire laptops"
-else
-    SSID="$(sed 's/^0x//' "$ACP/subsystem_device" | tr a-f A-F)"
-    ok "AMD ACP at ${ACP##*/}, subsystem ID $SSID"
-fi
-
-AMPS=()
-for d in /sys/bus/soundwire/devices/sdw:*:*:0102:*; do
-    [ -e "$d" ] && AMPS+=("${d##*/}")
-done
 if [ ${#AMPS[@]} -eq 0 ]; then
     bad "no TI SoundWire devices found (manufacturer 0x0102)"
     info "either the hardware differs, or the kernel lacks AMD SoundWire support"
@@ -84,33 +124,81 @@ else
     bad "kernel $(uname -r) has no TAS2783 SoundWire driver - a newer kernel is required"
 fi
 
+# ---------------------------------------------------------------- variant
+# Decided lazily: only needed if some requested firmware name is missing or is our symlink.
+VARIANT=""
+VARIANT_STATE=""   # "", "ok" or "blocked"
+resolve_variant() {
+    [ "$VARIANT_STATE" = ok ] && return 0
+    [ "$VARIANT_STATE" = blocked ] && return 1
+    if [ -n "${TAS_VARIANT:-}" ]; then
+        VARIANT="$TAS_VARIANT"
+        ok "firmware variant $VARIANT (from TAS_VARIANT)"
+    else
+        case "$SSID" in
+            8EA2) VARIANT=1
+                  ok "firmware variant 1 (default for board 8EA2, matches HP's Windows driver)";;
+            *)
+                local vs
+                vs="$(cd "$FW_TI" && ls -1 | sed -n "s/^$SSID-\([0-9]\+\)-[0-9]\+-0x.*/\1/p" | sort -u)"
+                if [ -z "$vs" ]; then
+                    bad "no <SSID>-<variant>-<link>-0x<uid> firmware for $SSID in $FW_TI"
+                    info "available for this model: $(cd "$FW_TI" && ls | grep -i "^$SSID" | tr '\n' ' ')"
+                    VARIANT_STATE=blocked; return 1
+                elif [ "$(echo "$vs" | wc -l)" -eq 1 ]; then
+                    VARIANT="$vs"
+                    ok "firmware variant $VARIANT (only variant shipped for $SSID)"
+                else
+                    bad "several firmware variants exist for $SSID ($(echo "$vs" | tr '\n' ' ')) and no known default"
+                    info "available: $(cd "$FW_TI" && ls | grep "^$SSID-" | tr '\n' ' ')"
+                    info "pick one (see README: checking your variant) and run e.g.:"
+                    info "  sudo TAS_VARIANT=1 $0 apply"
+                    VARIANT_STATE=blocked; return 1
+                fi;;
+        esac
+    fi
+    VARIANT_STATE=ok
+}
+
 # ---------------------------------------------------------------- firmware
 echo "== Amp firmware"
-LINKS=()   # entries: "linkname target"
+LINKS=()   # entries: "old_path_or_- linkname target"
 if [ ! -d "$FW_TI" ]; then
     bad "$FW_TI missing - install a newer linux-firmware (TI/tas2783 files)"
-elif [ -n "${SSID:-}" ]; then
+elif [ -n "$SSID" ]; then
     for a in "${AMPS[@]}"; do
-        # sdw:<ctrl>:<link>:<mfg>:<part>:<ver>:<unique>
-        IFS=: read -r _ ctrl link _ _ _ uid <<<"$a"
-        uid="$(echo "${uid:-0}" | tr a-f A-F)"
-        want="$SSID-$link-0x$uid"            # name the kernel driver requests
-        if ls "$FW_ROOT/$want".bin* >/dev/null 2>&1; then
-            ok "$want.bin already present"
+        parse_amp "$a"
+        cur="$(find_requested "$WANT")"
+        if [ -n "$cur" ] && [ ! -L "$cur" ]; then
+            ok "$WANT.bin is a real file (not ours), leaving it alone"
             continue
         fi
+        if [ -n "$cur" ] && pkg_owned "$cur"; then
+            ok "$WANT.bin is provided by a package ($(readlink "$cur")), leaving it alone"
+            continue
+        fi
+        resolve_variant || continue
+        base="$SSID-$VARIANT-$LINK-0x$UID_HEX"
         target=""
-        for cand in "$SSID-$link-0-0x$uid" "$SSID-$ctrl-$link-0x$uid"; do
-            for ext in .bin.zst .bin.xz .bin; do
-                if [ -e "$FW_TI/$cand$ext" ]; then target="$cand$ext"; break 2; fi
-            done
+        for ext in .bin.zst .bin.xz .bin; do
+            if [ -e "$FW_TI/$base$ext" ]; then target="$base$ext"; break; fi
         done
-        if [ -n "$target" ]; then
-            todo "driver wants $want.bin; will link to ti/audio/tas2783/$target"
-            LINKS+=("$want${target#"${target%%.bin*}"} ti/audio/tas2783/$target")
-        else
-            bad "no firmware for $want in $FW_TI (looked for $SSID-$link-0-0x$uid.*)"
+        if [ -z "$target" ]; then
+            bad "no firmware $base.* in $FW_TI for $WANT"
             info "available for this model: $(cd "$FW_TI" && ls | grep -i "^$SSID" | tr '\n' ' ')"
+            continue
+        fi
+        name="$WANT${target#"$base"}"
+        if [ -n "$cur" ]; then
+            if [ "$cur" = "$FW_ROOT/$name" ] && [ "$(readlink "$cur")" = "$FW_REL/$target" ]; then
+                ok "$WANT.bin -> $FW_REL/$target"
+                continue
+            fi
+            todo "$WANT.bin points to $(readlink "$cur"); will repoint to $FW_REL/$target"
+            LINKS+=("$cur $name $FW_REL/$target")
+        else
+            todo "$WANT.bin missing; will link to $FW_REL/$target"
+            LINKS+=("- $name $FW_REL/$target")
         fi
     done
 fi
@@ -133,15 +221,16 @@ if [ "$BLOCKED" -eq 1 ]; then
 fi
 if [ "$NEED_FIX" -eq 0 ]; then
     [ "$BLOCKED" -eq 0 ] && echo "Nothing to do - everything this fix covers is already in place."
-    [ "$BLOCKED" -eq 1 ] && exit 2 || exit 0
+    if [ "$BLOCKED" -eq 1 ]; then exit 2; else exit 0; fi
 fi
 if [ "$MODE" = check ]; then
     echo "Run 'sudo $0 apply' to apply the fix."
-    [ "$BLOCKED" -eq 1 ] && exit 2 || exit 1
+    if [ "$BLOCKED" -eq 1 ]; then exit 2; else exit 1; fi
 fi
 
 for e in "${LINKS[@]}"; do
-    name="${e%% *}"; target="${e#* }"
+    read -r old name target <<<"$e"
+    [ "$old" != - ] && rm -v "$old"
     ln -sfv "$target" "$FW_ROOT/$name"
 done
 if [ -d "$UCM_DIR" ] && [ ! -f "$UCM_FILE" ]; then
